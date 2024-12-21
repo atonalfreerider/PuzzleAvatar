@@ -109,18 +109,23 @@ class StableDiffusion(nn.Module):
             # load peft model
             from peft import PeftModel
             self.text_encoder = PeftModel.from_pretrained(
-                pipe.text_encoder, join(model_key, 'text_encoder')
+                pipe.text_encoder, join(self.base_model_key, 'text_encoder')
             )
-            self.unet = PeftModel.from_pretrained(pipe.unet, join(model_key, 'unet'))
+            self.unet = PeftModel.from_pretrained(pipe.unet, join(self.base_model_key, 'unet'))
             self.vae = pipe.vae
             self.tokenizer = pipe.tokenizer
 
         else:
             pipe = DiffusionPipeline.from_pretrained(
-                model_key,
+                self.base_model_key,
                 torch_dtype=torch.float32,
                 requires_safety_checker=False,
             ).to(self.device)
+            pipe.enable_model_cpu_offload()
+            if not cfg.train.fp16:
+                ## fp32 requires extra memory safety on a 13GB VRAM GPU
+                pipe.enable_vae_slicing()
+                pipe.enable_vae_tiling()
 
             self.text_encoder = pipe.text_encoder
             self.unet = pipe.unet

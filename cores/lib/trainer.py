@@ -1034,7 +1034,6 @@ class Trainer(object):
                 # add alpha channel
                 preds = preds * preds_alpha + (1 - preds_alpha)
                 preds_normal = preds_normal * preds_alpha + (1 - preds_alpha)
-                preds_depth = preds_depth * preds_alpha + (1 - preds_alpha)
 
                 # all_gather/reduce the statistics (NCCL only support all_*)
                 if self.world_size > 1:
@@ -1046,13 +1045,6 @@ class Trainer(object):
                     ]    # [[B, ...], [B, ...], ...]
                     dist.all_gather(preds_list, preds)
                     preds = torch.cat(preds_list, dim=0)
-
-                    preds_depth_list = [
-                        torch.zeros_like(preds_depth).to(self.device)
-                        for _ in range(self.world_size)
-                    ]    # [[B, ...], [B, ...], ...]
-                    dist.all_gather(preds_depth_list, preds_depth)
-                    preds_depth = torch.cat(preds_depth_list, dim=0)
 
                     preds_normal_list = [
                         torch.zeros_like(preds_normal).to(self.device)
@@ -1068,11 +1060,6 @@ class Trainer(object):
 
                     pred = preds[0].detach().cpu().numpy()
                     pred = (pred * 255).astype(np.uint8)
-
-                    pred_depth = preds_depth[0].detach().cpu().numpy()
-                    pred_depth = (pred_depth -
-                                  pred_depth.min()) / (pred_depth.max() - pred_depth.min() + 1e-6)
-                    pred_depth = (pred_depth * 255).astype(np.uint8)
 
                     pred_normal = preds_normal[0].detach().cpu().numpy()
                     pred_normal = (pred_normal * 255).astype(np.uint8)

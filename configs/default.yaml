@@ -3,7 +3,7 @@ exp_root: null
 stage: null
 use_gl: False
 profile: False
-fp16: False
+fp16: True
 
 model:
   use_dmtet_network: False

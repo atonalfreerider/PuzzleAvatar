@@ -56,6 +56,40 @@ PuzzleAvatar reconstructs a textured 3D clothed human from **unconstrained photo
 
 ## Getting Started
 
+conda env create -f environment.yml
+requires gcc 13
+https://askubuntu.com/questions/26498/how-to-choose-the-default-gcc-and-g-version
+
+add to diffusers/.../autoencoder_kl.py ln 290:
+```
+def decode_latent(self, z: torch.Tensor) -> torch.Tensor:
+    """
+    Decodes the latent space tensor `z` into pixel space using `post_quant_conv` and `decoder`.
+    Ensures dtype consistency between `z` and model weights.
+    """
+    z = z.to(self.post_quant_conv.weight.dtype)  # Match input dtype to the model weights
+    if self.post_quant_conv is not None:
+        z = self.post_quant_conv(z)  # Apply post quantization convolution
+    return self.decoder(z)
+
+def _decode(self, z: torch.Tensor, return_dict: bool = True) -> Union[DecoderOutput, torch.Tensor]:
+    """
+    Handles optional tiling and prepares the output format (dict or raw tensor).
+    Delegates actual decoding to `decode_latent`.
+    """
+    # Handle tiling if enabled and input dimensions exceed tile size
+    if self.use_tiling and (z.shape[-1] > self.tile_latent_min_size or z.shape[-2] > self.tile_latent_min_size):
+        return self.tiled_decode(z, return_dict=return_dict)
+
+    # Perform decoding via decode_latent
+    decoded = self.decode_latent(z)
+
+    if not return_dict:
+        return (decoded,)  # Return as tuple if `return_dict` is False
+
+    return DecoderOutput(sample=decoded)
+```
+
 1. Set up the paths in `scripts/env.sh`.
 2. Please follow the [Installation Instruction](install.md) to setup all the required packages.
 3. Run PuzzleAvatar (Grounded-SAM $\rightarrow$ PuzzleBooth $\rightarrow$ SDS, takes about 4 hours)

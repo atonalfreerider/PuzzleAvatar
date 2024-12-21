@@ -21,22 +21,24 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as nnf
+from torch.cuda.amp import autocast
 from PIL import Image
 from diffusers.models.attention_processor import Attention
 
 
 class P2PCrossAttnProcessor:
-    def __init__(self, controller, place_in_unet):
+    def __init__(self, controller, place_in_unet, chunk_size=64):
         super().__init__()
         self.controller = controller
         self.place_in_unet = place_in_unet
+        self.chunk_size = chunk_size  # Start with default chunk size
 
     def __call__(
         self,
         attn: Attention,
-        hidden_states,
-        encoder_hidden_states=None,
-        attention_mask=None,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ):
         batch_size, sequence_length, _ = hidden_states.shape
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
@@ -44,9 +46,7 @@ class P2PCrossAttnProcessor:
         query = attn.to_q(hidden_states)
 
         is_cross = encoder_hidden_states is not None
-        encoder_hidden_states = (
-            encoder_hidden_states if encoder_hidden_states is not None else hidden_states
-        )
+        encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
         key = attn.to_k(encoder_hidden_states)
         value = attn.to_v(encoder_hidden_states)
 
@@ -54,20 +54,67 @@ class P2PCrossAttnProcessor:
         key = attn.head_to_batch_dim(key)
         value = attn.head_to_batch_dim(value)
 
-        attention_probs = attn.get_attention_scores(query, key, attention_mask)
+        attention_probs = []
+        try:
+            with autocast():  # Enable mixed precision
+                for i in range(0, query.shape[1], self.chunk_size):
+                    attention_chunk = self.get_attention_scores(
+                        query[:, i:i + self.chunk_size],
+                        key,
+                        attention_mask
+                    )
+                    attention_probs.append(attention_chunk)
 
-        # one line change
-        self.controller(attention_probs, is_cross, self.place_in_unet)
+                attention_probs = torch.cat(attention_probs, dim=1)
 
-        hidden_states = torch.bmm(attention_probs, value)
-        hidden_states = attn.batch_to_head_dim(hidden_states)
+            torch.cuda.empty_cache()  # Clear memory
+            # Updated: Pass attention_probs to controller
+            self.controller(attention_probs, is_cross, self.place_in_unet)
 
-        # linear proj
-        hidden_states = attn.to_out[0](hidden_states)
-        # dropout
-        hidden_states = attn.to_out[1](hidden_states)
+            hidden_states = torch.bmm(attention_probs, value)
+            hidden_states = attn.batch_to_head_dim(hidden_states)
 
-        return hidden_states
+            # Linear projection
+            hidden_states = attn.to_out[0](hidden_states)
+            # Dropout
+            hidden_states = attn.to_out[1](hidden_states)
+
+            return hidden_states
+
+        except torch.cuda.OutOfMemoryError as e:
+            print("Out of memory, reducing chunk size dynamically...")
+            self.chunk_size = max(16, self.chunk_size // 2)  # Halve the chunk size
+            torch.cuda.empty_cache()
+            raise e
+
+    def get_attention_scores(
+        self, query: torch.Tensor, key: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        dtype = query.dtype
+        if attention_mask is None:
+            baddbmm_input = torch.empty(
+                query.shape[0], query.shape[1], key.shape[1], dtype=query.dtype, device=query.device
+            )
+            beta = 0
+        else:
+            baddbmm_input = attention_mask
+            beta = 1
+
+        # Compute scaled dot-product attention scores
+        attention_scores = torch.baddbmm(
+            baddbmm_input,
+            query,
+            key.transpose(-1, -2),
+            beta=beta,
+            alpha=1.0 / query.shape[-1] ** 0.5,
+        )
+        del baddbmm_input  # Free memory immediately
+
+        attention_probs = attention_scores.softmax(dim=-1)
+        attention_probs = attention_probs.to(dtype)
+
+        torch.cuda.empty_cache()  # Free unused memory
+        return attention_probs
 
 
 def text_under_image(

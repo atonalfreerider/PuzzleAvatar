@@ -10,6 +10,7 @@ model:
     use_can_pose_space: False
     use_vertex_tex: True
 train:
+    fp16: False
     lock_geo: True
     h: 512
     w: 512

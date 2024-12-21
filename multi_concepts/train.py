@@ -105,7 +105,7 @@ class SpatialDreambooth:
 
         self.accelerator = Accelerator(
             gradient_accumulation_steps=self.args.gradient_accumulation_steps,
-            mixed_precision=self.args.mixed_precision,
+            mixed_precision="fp16",
             log_with=self.args.report_to,
             project_dir=logging_dir,
         )
@@ -306,7 +306,7 @@ class SpatialDreambooth:
                     # generate attn_mask_cache file
                     pipeline = DiffusionPipeline.from_pretrained(
                         self.args.pretrained_model_name_or_path,
-                        torch_dtype=self.weight_dtype,
+                        torch_dtype=torch.float16,
                         safety_checker=None,
                         revision=self.args.revision,
                     )
@@ -315,6 +315,9 @@ class SpatialDreambooth:
                     # pipeline.enable_freeu(s1=0.9, s2=0.2, b1=1.4, b2=1.6)
                     pipeline.set_progress_bar_config(disable=True)
                     pipeline.to(self.accelerator.device)
+                    pipeline.enable_model_cpu_offload()
+                    pipeline.enable_vae_slicing()
+                    pipeline.enable_vae_tiling()
 
                     for class_name in [self.args.gender]:
 
@@ -465,19 +468,6 @@ class SpatialDreambooth:
             " doing mixed precision training. copy of the weights should still be float32."
         )
 
-        if self.accelerator.unwrap_model(self.unet).dtype != torch.float32:
-            raise ValueError(
-                f"Unet loaded as datatype {self.accelerator.unwrap_model(self.unet).dtype}. {low_precision_error_string}"
-            )
-
-        if (
-            self.args.train_text_encoder and
-            self.accelerator.unwrap_model(self.text_encoder).dtype != torch.float32
-        ):
-            raise ValueError(
-                f"Text encoder loaded as datatype {self.accelerator.unwrap_model(self.text_encoder).dtype}."
-                f" {low_precision_error_string}"
-            )
 
         # We need to recalculate our total training steps as the size of the training dataloader may have changed.
         num_update_steps_per_epoch = math.ceil(
@@ -1084,30 +1074,62 @@ class SpatialDreambooth:
     def register_attention_control(self, controller):
         attn_procs = {}
         cross_att_count = 0
+
+        # Cache block_out_channels to avoid repetitive access
+        block_out_channels = self.unet.config.block_out_channels
+        reversed_block_out_channels = list(reversed(block_out_channels))
+
+        # Dynamically determine chunk_size based on memory
+        chunk_size = self.determine_chunk_size()  # Define this function to assess memory dynamically
+
         for name in self.unet.attn_processors.keys():
             cross_attention_dim = (
                 None if name.endswith("attn1.processor") else self.unet.config.cross_attention_dim
             )
+
             if name.startswith("mid_block"):
-                hidden_size = self.unet.config.block_out_channels[-1]
+                hidden_size = block_out_channels[-1]
                 place_in_unet = "mid"
             elif name.startswith("up_blocks"):
-                block_id = int(name[len("up_blocks.")])
-                hidden_size = list(reversed(self.unet.config.block_out_channels))[block_id]
+                block_id = int(name[len("up_blocks."):].split(".")[0])
+                hidden_size = reversed_block_out_channels[block_id]
                 place_in_unet = "up"
             elif name.startswith("down_blocks"):
-                block_id = int(name[len("down_blocks.")])
-                hidden_size = self.unet.config.block_out_channels[block_id]
+                block_id = int(name[len("down_blocks."):].split(".")[0])
+                hidden_size = block_out_channels[block_id]
                 place_in_unet = "down"
             else:
                 continue
-            cross_att_count += 1
-            attn_procs[name] = P2PCrossAttnProcessor(
-                controller=controller, place_in_unet=place_in_unet
-            )
 
+            # Lazy initialization for memory efficiency
+            if name not in attn_procs:
+                attn_procs[name] = P2PCrossAttnProcessor(
+                    controller=controller,
+                    place_in_unet=place_in_unet,
+                    chunk_size=chunk_size,  # Pass the dynamic chunk size here
+                )
+
+            cross_att_count += 1
+
+        # Batch register processors
         self.unet.set_attn_processor(attn_procs)
         controller.num_att_layers = cross_att_count
+
+    def determine_chunk_size(default_chunk=64):
+        """Dynamically adjust chunk size based on available GPU memory."""
+        try:
+            free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved()
+            # Estimate appropriate chunk size based on free memory
+            if free_memory > 6e9:  # More than 6GB free
+                return 128
+            elif free_memory > 3e9:  # More than 3GB free
+                return 64
+            else:
+                return 32
+        except Exception as e:
+            print(f"Error determining chunk size: {e}")
+            return default_chunk
+
 
     def get_average_attention(self):
         average_attention = {

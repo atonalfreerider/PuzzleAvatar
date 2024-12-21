@@ -11,5 +11,5 @@ version_str = "".join([
 
 os.system("pip install fvcore iopath")
 os.system(
-    f"pip install --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/{version_str}/download.html"
+    f"pip install --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt251/download.html"
 )

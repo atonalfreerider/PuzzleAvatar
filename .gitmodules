@@ -1,12 +1,12 @@
 [submodule "thirdparties/nvdiffrast"]
 	path = thirdparties/nvdiffrast
-	url = git@github.com:NVlabs/nvdiffrast.git
+	url = https://github.com/NVlabs/nvdiffrast.git
 	ignore = dirty
 [submodule "thirdparties/GroundingDINO"]
 	path = thirdparties/GroundingDINO
-	url = git@github.com:IDEA-Research/GroundingDINO.git
+	url = https://github.com/IDEA-Research/GroundingDINO.git
 	ignore = dirty
 [submodule "thirdparties/peft"]
 	path = thirdparties/peft
-	url = git@github.com:huggingface/peft.git
+	url = https://github.com/huggingface/peft
 	ignore = dirty
